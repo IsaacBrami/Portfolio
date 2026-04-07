@@ -1,0 +1,166 @@
+name: Deploy Pipeline
+
+# ── TRIGGERS ────────────────────────────────────────────────────────
+# This pipeline runs on two different events:
+# 1. Push to "dev" branch  → deploys to AWS
+# 2. Push to "main" branch → deploys to Hetzner (production)
+on:
+  push:
+    branches:
+      - main
+      - dev
+  workflow_dispatch:   # allows manual trigger from GitHub Actions UI
+
+# ── GLOBAL ENV VARS ──────────────────────────────────────────────────
+# Available to all jobs. Adjust APP_DIR to match where your code lives
+# on each server.
+env:
+  APP_DIR: /opt/app    # deployment directory on both servers
+  REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+
+# ── JOBS ─────────────────────────────────────────────────────────────
+jobs:
+
+  # ── JOB 1: Deploy to AWS (runs only on push to "dev") ─────────────
+  deploy-aws:
+    name: Deploy to AWS (dev)
+    runs-on: ubuntu-latest
+
+    # Condition: only run this job if the push was to the "dev" branch
+    if: github.ref == "refs/heads/dev"
+
+    steps:
+      # Step 1: Announce what is happening (useful in logs)
+      - name: Deployment info
+        run: |
+          echo "Deploying branch: ${{ github.ref_name }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Triggered by: ${{ github.actor }}"
+
+      # Step 2: SSH into AWS and deploy
+      # appleboy/ssh-action handles all SSH plumbing for you.
+      # It uses the private key from Secrets, connects to the host,
+      # and runs the "script" block as a bash script on the remote server.
+      - name: Deploy to AWS EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.AWS_HOST }}
+          username: ${{ secrets.AWS_USER }}
+          key: ${{ secrets.AWS_SSH_KEY }}
+          port: 2222
+          script: |
+            set -e   # stop script on any error
+
+            echo "=== Starting AWS deployment ==="
+            echo "Time: $(date)"
+
+            # If the app directory is empty, clone the repo first.
+            # On subsequent deploys, this is skipped.
+            if [ ! -d "${{ env.APP_DIR }}/.git" ]; then
+              echo "First deploy: cloning repository..."
+              git clone ${{ env.REPO_URL }} ${{ env.APP_DIR }}
+            fi
+
+            cd ${{ env.APP_DIR }}
+
+            # Switch to the dev branch and pull latest code
+            git fetch origin
+            git checkout dev
+            git pull origin dev
+
+            # Load environment variables if .env exists
+            if [ -f .env ]; then
+              echo "Loading .env file..."
+              export $(grep -v "^#" .env | xargs)
+            fi
+
+            # Rebuild and restart containers
+            # --build: rebuilds image if Dockerfile changed
+            # -d: detached mode (runs in background)
+            docker compose up -d --build
+
+            # Wait for containers to fully start
+            sleep 5
+
+            # Verify containers are running
+            docker compose ps
+
+            # Clean up old unused images to save disk space
+            docker image prune -f
+
+            echo "=== AWS deployment complete ==="
+            echo "$(date): Deployed ${{ github.sha }}" >> /opt/app/deploy.log
+
+
+  # ── JOB 2: Deploy to Hetzner (runs only on push to "main") ────────
+  deploy-hetzner:
+    name: Deploy to Hetzner (production)
+    runs-on: ubuntu-latest
+
+    # Condition: only run this job if the push was to the "main" branch
+    if: github.ref == "refs/heads/main"
+
+    steps:
+      - name: Deployment info
+        run: |
+          echo "Deploying to PRODUCTION"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Triggered by: ${{ github.actor }}"
+
+      # Step 2: SSH into Hetzner and deploy
+      # Same pattern as AWS, but with Hetzner credentials and
+      # extra steps to keep Nginx working correctly.
+      - name: Deploy to Hetzner
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.HETZNER_HOST }}
+          username: ${{ secrets.HETZNER_USER }}
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          script: |
+            set -e
+
+            echo "=== Starting Hetzner production deployment ==="
+            echo "Time: $(date)"
+
+            # Navigate to your app directory on Hetzner
+            # IMPORTANT: change this path to wherever your app actually lives
+            APP_PATH="/opt/pleasehireme"
+            cd $APP_PATH
+
+            # Pull latest code from main
+            git fetch origin
+            git pull origin main
+
+            # Rebuild and restart containers
+            docker compose up -d --build
+
+            # Wait for containers to start
+            sleep 5
+
+            # Verify containers are healthy
+            docker compose ps
+
+            # Verify Nginx is still running (CRITICAL for production)
+            # If nginx is down, this step fails and the pipeline marks as failed
+            if ! systemctl is-active --quiet nginx; then
+              echo "ERROR: Nginx is not running after deployment!"
+              systemctl status nginx
+              exit 1
+            fi
+            echo "Nginx: running"
+
+            # HTTP health check through Nginx
+            # Replace with your actual health check endpoint
+            if curl -sf --max-time 10 https://pleasehireme.co.il > /dev/null; then
+              echo "Health check: PASSED"
+            else
+              echo "Health check: FAILED"
+              exit 1
+            fi
+
+            # Clean up old images
+            docker image prune -f
+
+            echo "=== Production deployment complete ==="
+            echo "$(date): Deployed ${{ github.sha }}" >> $APP_PATH/deploy.log
