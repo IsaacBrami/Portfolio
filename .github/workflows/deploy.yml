@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
 
     # Condition: only run this job if the push was to the "dev" branch
-    if: github.ref == "refs/heads/dev"
+    if: ${{ github.ref == 'refs/heads/dev' }}
 
     steps:
       # Step 1: Announce what is happening (useful in logs)
@@ -98,7 +98,7 @@ jobs:
     runs-on: ubuntu-latest
 
     # Condition: only run this job if the push was to the "main" branch
-    if: github.ref == "refs/heads/main"
+    if: github.ref == ${{ 'refs/heads/main' }}
 
     steps:
       - name: Deployment info
