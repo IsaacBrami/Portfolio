@@ -1,6 +1,7 @@
-
 services:
   app:
     image: nginx:alpine
+    volumes:
+      - ./public:/usr/share/nginx/html
     ports:
       - "3000:80"
